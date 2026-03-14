@@ -21,8 +21,8 @@ main(void)
      * not setting the hints.ai_flags to AI_PASSIVE
      */
     int status;
-    if ((status = getaddrinfo("www.example.com", "3490", &hints, *res)) == -1) {
-        fprintf(stderr, "Error: %s\n", status);
+    if ((status = getaddrinfo("www.example.com", "3490", &hints, &res)) == -1) {
+        fprintf(stderr, "Error: %s\n", gai_strerror(status));
         exit(EXIT_FAILURE);
     }
 
