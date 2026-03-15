@@ -13,9 +13,9 @@ main(void)
     struct addrinfo *res;
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_flags    = AI_PASSIVE;
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags    = AI_PASSIVE;   // get the current machine's IP
+    hints.ai_family   = AF_UNSPEC;    // can choose either IPv4 or IPv6
+    hints.ai_socktype = SOCK_STREAM;  // use stream socket
 
     int status;
     if ((status = getaddrinfo(NULL, "3490", &hints, &res)) == -1) {
