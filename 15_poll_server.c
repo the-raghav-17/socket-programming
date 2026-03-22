@@ -12,6 +12,7 @@
 
 #define PORT "9034"
 #define BACKLOG 10
+#define MAX_MSG_LEN 100
 
 
 void *
@@ -44,6 +45,14 @@ add_to_pfds(struct pollfd **pfds, int new_fd, int *fd_count, int *fd_size)
     (*pfds)[*fd_count].events  = POLLIN;
     (*pfds)[*fd_count].revents = 0;
     *fd_count += 1;
+}
+
+
+void
+del_from_pfds(struct pollfd pfds[], int i, int *fd_count)
+{
+    pfds[i] = pfds[*fd_count - 1];
+    (*fd_count)--;
 }
 
 
@@ -107,62 +116,77 @@ main(void)
 {
     int listener = get_listener_socket();
     if (listener == -1) {
-        perror("Falied to get listener socket");
+        fprintf(stderr, "pollserver: failed to get listener socket\n");
         exit(EXIT_FAILURE);
     }
 
-    // Setup the pollfd array
-    int fd_count        = 0;
-    int fd_size         = 5;
+    int fd_size  = 5;
+    int fd_count = 0;
     struct pollfd *pfds = malloc(fd_size * sizeof(*pfds));
     if (pfds == NULL) {
-        perror("malloc");
+        perror("pollserver: malloc");
         exit(EXIT_FAILURE);
     }
 
-    pfds[0].fd     = listener;
+    pfds[0].fd     = STDIN_FILENO;
     pfds[0].events = POLLIN;
-    fd_count       = 1;
+    fd_count      += 1;
 
     for (;;) {
-        int poll_events = poll(pfds, fd_count, -1);
-        if (poll_events == -1) {
-            perror("poll");
+        int num_events = poll(pfds, fd_count, -1);
+        if (num_events == -1) {
+            perror("pollserver: poll");
             exit(EXIT_FAILURE);
         }
 
         for (int i = 0; i < fd_count; i++) {
-            // If a socket recieved a change
             if (pfds[i].revents & (POLLIN | POLLHUP)) {
                 if (pfds[i].fd == listener) {
-                    // We got another connection
+                    // Server recieved another connection request
                     struct sockaddr_storage remote_addr;
-                    socklen_t addrlen = sizeof(remote_addr);
+                    socklen_t remote_addrlen = sizeof(remote_addr);
 
                     int new_fd = accept(listener, (struct sockaddr *)&remote_addr,
-                                        &addrlen);
-                    if (new_fd == -1) {
-                        perror("accept");
-                    }
-                    else {
-                        add_to_pfds(&pfds, new_fd, &fd_count, &fd_size);
+                                        &remote_addrlen);
+                    add_to_pfds(&pfds, new_fd, &fd_count, &fd_size);
 
-                        char addrstr[INET6_ADDRSTRLEN];
-                        inet_ntop(remote_addr.ss_family,
-                                  get_addr((struct sockaddr *)&remote_addr),
-                                  addrstr, sizeof(addrstr));
+                    char remote_addrstr[INET6_ADDRSTRLEN];
+                    inet_ntop(remote_addr.ss_family,
+                              get_addr((struct sockaddr *)&remote_addr),
+                              remote_addrstr, sizeof(remote_addrstr));
 
-                        printf("pollserver: Got connection from %s on socket %d\n",
-                               addrstr, new_fd);
-                    }
+                    printf("pollserver: Connected with %s on socket %d\n",
+                           remote_addrstr, new_fd);
                 }
                 else {
-                    // Remote we're connected to sent a message
-                }
-            }
-            else {
-                // TODO: Fill this
+                   // Already connected client sent some data
+                    char msg[MAX_MSG_LEN];
+                    int send_fd  = pfds[i].fd;
 
+                    int numbytes = recv(send_fd, msg, sizeof(msg), 0);
+                    if (numbytes <= 0) {
+                        if (numbytes == 0) {
+                            printf("pollserver: socket %d hung up\n", send_fd);
+                        } else {
+                            perror("pollserver: recv");
+                        }
+                        close(send_fd);
+                        del_from_pfds(pfds, i, &fd_count);
+                        i--;
+                    }
+                    else {
+                        // Client sent some data; send it to everyone else
+                        for (int j = 0; j < fd_count; j++) {
+                            int recv_fd = pfds[i].fd;
+
+                            if (recv_fd != listener && recv_fd != send_fd) {
+                                if (send(recv_fd, msg, numbytes, 0) == -1) {
+                                    perror("pollserver: send");
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
