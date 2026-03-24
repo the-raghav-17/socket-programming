@@ -15,47 +15,6 @@
 #define MAX_MSG_LEN 100
 
 
-void *
-get_addr(struct sockaddr *sa)
-{
-    if (sa->sa_family == AF_INET) {
-        return &(((struct sockaddr_in *)sa)->sin_addr);
-    }
-    return &(((struct sockaddr_in6 *)sa)->sin6_addr);
-}
-
-
-void
-add_to_pfds(struct pollfd **pfds, int new_fd, int *fd_count, int *fd_size)
-{
-    if (*fd_count >= *fd_size) {
-        *fd_size += 5;
-
-        struct pollfd *temp = realloc(*pfds, *fd_size * sizeof(*temp));
-        if (temp == NULL) {
-            perror("realloc");
-            return;
-        }
-
-        *pfds = temp;
-    }
-
-
-    (*pfds)[*fd_count].fd      = new_fd;
-    (*pfds)[*fd_count].events  = POLLIN;
-    (*pfds)[*fd_count].revents = 0;
-    *fd_count += 1;
-}
-
-
-void
-del_from_pfds(struct pollfd pfds[], int i, int *fd_count)
-{
-    pfds[i] = pfds[*fd_count - 1];
-    (*fd_count)--;
-}
-
-
 int
 get_listener_socket(void)
 {
@@ -67,9 +26,9 @@ get_listener_socket(void)
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags    = AI_PASSIVE;
 
-    int status;
-    if ((status = getaddrinfo(NULL, PORT, &hints, &res)) == -1) {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
+    int rv;
+    if ((rv = getaddrinfo(NULL, PORT, &hints, &res)) == -1) {
+        fprintf(stderr, "pollserver: getaddrinfo: %s\n", gai_strerror(rv));
         return -1;
     }
 
@@ -79,18 +38,18 @@ get_listener_socket(void)
 
     for (p = res; p != NULL; p = p->ai_next) {
         if ((listener = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-            perror("socket");
+            perror("pollserver: socket");
             continue;
         }
 
         if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) == -1) {
-            perror("setsockopt");
+            perror("pollserver: setsockopt");
             close(listener);
             return -1;
         }
 
         if (bind(listener, p->ai_addr, p->ai_addrlen) == -1) {
-            perror("bind");
+            perror("pollserver: bind");
             close(listener);
             continue;
         }
@@ -98,97 +57,159 @@ get_listener_socket(void)
     }
 
     if (p == NULL) {
-        fprintf(stderr, "Couldn't bind to socket\n");
+        perror("pollserver: binding failed\n");
         return -1;
     }
 
     if (listen(listener, BACKLOG) == -1) {
-        perror("listen");
+        perror("pollserver: listen");
         return -1;
     }
-
     return listener;
+}
+
+
+void
+add_to_pfds(struct pollfd **pfds, int listener,
+            int *fd_count, int *fd_size)
+{
+    if (*fd_size <= *fd_count) {
+        *fd_size *= 2;
+        *pfds = realloc(*pfds, *fd_size * sizeof(**pfds));
+    }
+
+    (*pfds)[*fd_count].fd    = listener;
+    (*pfds)[*fd_count].events = POLLIN;
+    *fd_count += 1;
+}
+
+
+void *
+get_addr(struct sockaddr *sa)
+{
+    if (sa->sa_family == AF_INET) {
+        return &(((struct sockaddr_in *)sa)->sin_addr);
+    }
+    return &(((struct sockaddr_in6 *)sa)->sin6_addr);
+}
+
+
+void
+handle_listener_event(struct pollfd **pfds, int listener,
+                      int *fd_count, int *fd_size)
+{
+    struct sockaddr_storage remote_addr;
+    socklen_t remote_addrlen = sizeof(remote_addr);
+
+    int new_fd = accept(listener, (struct sockaddr *)&remote_addr,
+                        &remote_addrlen);
+    if (new_fd == -1) {
+        perror("pollserver: accept");
+        return;
+    }
+
+    add_to_pfds(pfds, listener, fd_count, fd_size);
+
+    char remote_addrstr[INET6_ADDRSTRLEN];
+    inet_ntop(remote_addr.ss_family, get_addr((struct sockaddr *)&remote_addr),
+              remote_addrstr, sizeof(remote_addrstr));
+
+    printf("pollserver: connected to %s on socket %d\n",
+           remote_addrstr, new_fd);
+}
+
+
+void
+delete_from_pfds(struct pollfd **pfds, int i, int *fd_count)
+{
+    for (int j = i + 1; j < *fd_count; j++) {
+        (*pfds)[j - 1] = (*pfds)[j];
+    }
+
+    *fd_count -= 1;
+}
+
+
+void
+handle_client_event(struct pollfd **pfds, int i, int listener,
+                    int *fd_count, int *fd_size)
+{
+    int sender = (*pfds)[i].fd;
+    char msg[MAX_MSG_LEN];
+
+    int num_bytes = recv(listener, msg, sizeof(msg), 0);
+    if (num_bytes <= 0) {
+        if (num_bytes == 0) {
+            printf("pollserver: %d disconnected\n",
+                   sender);
+        }
+        else {
+            perror("pollserver: listener");
+        }
+        delete_from_pfds(pfds, i, fd_count);
+        i--;
+    }
+    else {
+        // Send the message to everyone else {
+        for (int j = 0; j < *fd_count; j++) {
+            int reciever = (*pfds)[j].fd;
+            if (reciever != listener && reciever != sender) {
+                if (send(reciever, msg, sizeof(msg), 0) == -1) {
+                    perror("pollserver: send");
+                }
+            }
+        }
+    }
+}
+
+
+void
+handle_poll_event(struct pollfd **pfds, int listener, int *fd_count,
+                  int *fd_size)
+{
+    for (int i = 0; i < *fd_count; i++) {
+        // Check for the fd whose state has changed
+        if ((*pfds)[i].revents & (POLLIN | POLLHUP)) {
+            if ((*pfds)[i].fd == listener) {
+                // if listener has changed state
+                handle_listener_event(pfds, listener, fd_count, fd_size);
+            }
+            else {
+                // if client has changed state
+                handle_client_event(pfds, i, listener, fd_count, fd_size);
+            }
+        }
+    }
 }
 
 
 int
 main(void)
 {
+    int fd_count = 0;    // count of fd's to poll for
+    int fd_size  = 1;    // size of pfds array
+    struct pollfd *pfds = malloc(fd_size * sizeof(*pfds));
+
     int listener = get_listener_socket();
     if (listener == -1) {
         fprintf(stderr, "pollserver: failed to get listener socket\n");
         exit(EXIT_FAILURE);
     }
 
-    int fd_size  = 5;
-    int fd_count = 0;
-    struct pollfd *pfds = malloc(fd_size * sizeof(*pfds));
-    if (pfds == NULL) {
-        perror("pollserver: malloc");
-        exit(EXIT_FAILURE);
-    }
-
-    pfds[0].fd     = STDIN_FILENO;
-    pfds[0].events = POLLIN;
+    pfds[0].fd     = listener;   // listener will be the first socket to poll for
+    pfds[0].events = POLLIN;     // monitor any input events
     fd_count      += 1;
+
+    printf("pollserver: waiting for connections...\n");
 
     for (;;) {
         int num_events = poll(pfds, fd_count, -1);
         if (num_events == -1) {
             perror("pollserver: poll");
-            exit(EXIT_FAILURE);
+            continue;
         }
 
-        for (int i = 0; i < fd_count; i++) {
-            if (pfds[i].revents & (POLLIN | POLLHUP)) {
-                if (pfds[i].fd == listener) {
-                    // Server recieved another connection request
-                    struct sockaddr_storage remote_addr;
-                    socklen_t remote_addrlen = sizeof(remote_addr);
-
-                    int new_fd = accept(listener, (struct sockaddr *)&remote_addr,
-                                        &remote_addrlen);
-                    add_to_pfds(&pfds, new_fd, &fd_count, &fd_size);
-
-                    char remote_addrstr[INET6_ADDRSTRLEN];
-                    inet_ntop(remote_addr.ss_family,
-                              get_addr((struct sockaddr *)&remote_addr),
-                              remote_addrstr, sizeof(remote_addrstr));
-
-                    printf("pollserver: Connected with %s on socket %d\n",
-                           remote_addrstr, new_fd);
-                }
-                else {
-                   // Already connected client sent some data
-                    char msg[MAX_MSG_LEN];
-                    int send_fd  = pfds[i].fd;
-
-                    int numbytes = recv(send_fd, msg, sizeof(msg), 0);
-                    if (numbytes <= 0) {
-                        if (numbytes == 0) {
-                            printf("pollserver: socket %d hung up\n", send_fd);
-                        } else {
-                            perror("pollserver: recv");
-                        }
-                        close(send_fd);
-                        del_from_pfds(pfds, i, &fd_count);
-                        i--;
-                    }
-                    else {
-                        // Client sent some data; send it to everyone else
-                        for (int j = 0; j < fd_count; j++) {
-                            int recv_fd = pfds[i].fd;
-
-                            if (recv_fd != listener && recv_fd != send_fd) {
-                                if (send(recv_fd, msg, numbytes, 0) == -1) {
-                                    perror("pollserver: send");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        handle_poll_event(&pfds, listener, &fd_count, &fd_size);
     }
 
     exit(EXIT_SUCCESS);
