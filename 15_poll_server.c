@@ -70,7 +70,7 @@ get_listener_socket(void)
 
 
 void
-add_to_pfds(struct pollfd **pfds, int listener,
+add_to_pfds(struct pollfd **pfds, int new_fd,
             int *fd_count, int *fd_size)
 {
     if (*fd_size <= *fd_count) {
@@ -78,7 +78,7 @@ add_to_pfds(struct pollfd **pfds, int listener,
         *pfds = realloc(*pfds, *fd_size * sizeof(**pfds));
     }
 
-    (*pfds)[*fd_count].fd    = listener;
+    (*pfds)[*fd_count].fd    = new_fd;
     (*pfds)[*fd_count].events = POLLIN;
     *fd_count += 1;
 }
@@ -108,7 +108,7 @@ handle_listener_event(struct pollfd **pfds, int listener,
         return;
     }
 
-    add_to_pfds(pfds, listener, fd_count, fd_size);
+    add_to_pfds(pfds, new_fd, fd_count, fd_size);
 
     char remote_addrstr[INET6_ADDRSTRLEN];
     inet_ntop(remote_addr.ss_family, get_addr((struct sockaddr *)&remote_addr),
@@ -137,7 +137,7 @@ handle_client_event(struct pollfd **pfds, int i, int listener,
     int sender = (*pfds)[i].fd;
     char msg[MAX_MSG_LEN];
 
-    int num_bytes = recv(listener, msg, sizeof(msg), 0);
+    int num_bytes = recv(sender, msg, sizeof(msg), 0);
     if (num_bytes <= 0) {
         if (num_bytes == 0) {
             printf("pollserver: %d disconnected\n",
