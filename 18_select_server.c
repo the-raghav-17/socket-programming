@@ -57,11 +57,11 @@ add_to_array(int fd, Fd_list *fd_list)
         fds       = realloc(fds, capacity * sizeof(*fds));
     }
 
-    fds[count]           = fd;
-    count               += 1;
+    fds[count]             = fd;
+    count                 += 1;
     fd_list->fl_fdcount    = count;
     fd_list->fl_fdcapacity = capacity;
-    fd_list->fl_fds      = fds;
+    fd_list->fl_fds        = fds;
 }
 
 
@@ -74,6 +74,43 @@ add_to_list(int fd, Fd_list *fd_list)
     if (fd > fd_list->fl_maxfd) {
         fd_list->fl_maxfd = fd;
     }
+}
+
+
+int
+get_max_fd(Fd_list *fd_list)
+{
+    if (fd_list->fl_fdcount == 0) {
+        return -1;
+    }
+
+    int max_fd = fd_list->fl_fds[0];
+    for (int i = 1; i < fd_list->fl_fdcount; i++) {
+        int fd = fd_list->fl_fds[i];
+        if (fd > max_fd) {
+            max_fd = fd;
+        }
+    }
+
+    return max_fd;
+}
+
+
+int *
+get_changed_fds(Fd_list *fd_list, int num_fds)
+{
+    int *changed_fds = malloc(num_fds * sizeof(*changed_fds));
+    int i = 0;
+
+    for (int j = 0; j < fd_list->fl_fdcount; j++) {
+        int fd = fd_list->fl_fds[j];
+        if (FD_ISSET(fd, &fd_list->fl_fdset)) {
+            changed_fds[i] = fd;
+            i++;
+        }
+    }
+
+    return changed_fds;
 }
 
 
@@ -143,6 +180,44 @@ get_addr(struct sockaddr *sa)
 }
 
 
+void
+handle_listener_event(Fd_list *fd_list, int listener)
+{
+    struct sockaddr_storage remote_addr;
+    socklen_t remote_addrlen = sizeof(remote_addr);
+
+    int new_fd = accept(listener, (struct sockaddr *)&remote_addr,
+                        &remote_addrlen);
+
+    char remote_addrstr[INET6_ADDRSTRLEN];
+    inet_ntop(remote_addr.ss_family, get_addr((struct sockaddr *)&remote_addr),
+              remote_addrstr, sizeof(remote_addrstr));
+
+    printf("server: Got connection from %s on socket %d\n",
+           remote_addrstr, new_fd);
+
+    add_to_list(new_fd, fd_list);
+}
+
+
+void
+handle_event(Fd_list *fd_list, int num_fds, int listener)
+{
+    int *changed_fds = get_changed_fds(fd_list, num_fds);
+    for (int i = 0; i < num_fds; i++) {
+        int fd = changed_fds[i];
+        if (fd == listener) {
+            handle_listener_event(fd_list, listener);
+        }
+        else {
+            /* handle_client_event(); */
+        }
+    }
+
+    free(changed_fds);
+}
+
+
 int
 main(void)
 {
@@ -152,59 +227,21 @@ main(void)
         exit(EXIT_FAILURE);
     }
 
-    int fd_size  = 1;    /* capacity of fds array */
-    int fd_count = 0;    /* actual fd count in the array */
-    int *fds     = malloc(fd_size * sizeof(*fds));
-    fds[0]       = listener;
-    fd_count    += 1;
-
-    fd_set readfds;
-    FD_SET(listener, &readfds);
+    Fd_list *fd_list = get_fd_list();
+    add_to_list(listener, fd_list);
 
     printf("server: waiting for connections...\n");
 
     for (;;) {
-        int num_fds = select(fds[fd_count - 1] + 1, &readfds, NULL,
-                             NULL, NULL);
+        int max_fd  = get_max_fd(fd_list);
+        int num_fds = select(max_fd + 1, &fd_list->fl_fdset, NULL, NULL, NULL);
         if (num_fds == -1) {
             perror("server: select");
             continue;
         }
 
-        /* We've got a state change in one or more of the fds */
-        for (int i = 0; i < fd_count; i++) {
-            int fd = fds[i];
-            if (FD_ISSET(fd, &readfds)) {
-                // TODO: check if listener or client and handle appropriately
-                if (fd == listener) {
-                    /* New connection */
-                    struct sockaddr_storage remote_addr;
-                    socklen_t remote_addrlen = sizeof(remote_addr);
-                    int new_fd = accept(listener, (struct sockaddr *)&remote_addr,
-                                        &remote_addrlen);
-
-                    char remote_addrstr[INET6_ADDRSTRLEN];
-                    inet_ntop(remote_addr.ss_family, get_addr((struct sockaddr *)&remote_addr),
-                              remote_addrstr, sizeof(remote_addrstr));
-                    printf("server: got new connection from %s on socket %d\n",
-                           remote_addrstr, new_fd);
-
-                    /* add the new connection to set */
-                    FD_SET(new_fd, &readfds);
-
-                    if (fd_size <= fd_count) {
-                        fd_size *= 2;
-                        fds  = realloc(fds, fd_size * sizeof(*fds));
-                    }
-                    fds[fd_count] = new_fd;
-                    fd_count += 1;
-                }
-                else {
-                    /* client sent a message */
-                }
-            }
-        }
+        handle_event(fd_list, num_fds, listener);
     }
 
-    exit(EXIT_FAILURE);
+    exit(EXIT_SUCCESS);
 }
