@@ -11,6 +11,7 @@
 
 #define PORT "9034"
 #define BACKLOG 10
+#define MAX_MSG_LEN 100
 
 
 /* ========== Fd_list object ========== */
@@ -77,6 +78,29 @@ add_to_list(int fd, Fd_list *fd_list)
 }
 
 
+void
+remove_from_array(int i , Fd_list *fd_list)
+{
+    int fd = fd_list->fl_fds[i];
+    FD_CLR(fd, &fd_list->fl_fdset);
+
+    for (int j = i + 1; j < fd_list->fl_fdcount; i++) {
+        fd_list->fl_fds[j - 1] = fd_list->fl_fds[j];
+    }
+}
+
+
+void
+remove_from_list(int fd, Fd_list *fd_list)
+{
+    for (int i = 0; i < fd_list->fl_fdcount; i++) {
+        if (fd == fd_list->fl_fds[i]) {
+            remove_from_array(i, fd_list);
+        }
+    }
+}
+
+
 int
 get_max_fd(Fd_list *fd_list)
 {
@@ -112,6 +136,9 @@ get_changed_fds(Fd_list *fd_list, int num_fds)
 
     return changed_fds;
 }
+
+
+/* ========== Helper functions for the server ========== */
 
 
 int
@@ -200,6 +227,46 @@ handle_listener_event(Fd_list *fd_list, int listener)
 }
 
 
+/* Broadcast message to everyone except sockfd1 and sockfd2 */
+void
+broadcast_msg(char *msg, int msg_len, Fd_list *fd_list,
+              int sockfd1, int sockfd2)
+{
+    for (int i = 0; i < fd_list->fl_fdcount; i++) {
+        int fd = fd_list->fl_fds[i];
+        if (fd != sockfd1 && fd != sockfd2) {
+            if (send(fd, msg, msg_len, 0) == -1) {
+                perror("server: send");
+            }
+        }
+    }
+}
+
+
+void
+handle_client_event(Fd_list *fd_list, int listener, int client)
+{
+    /* Client has either sent a message or has hung up */
+    char msg[MAX_MSG_LEN];
+    int num_bytes = recv(listener, msg, sizeof(msg), 0);
+
+    if (num_bytes <= 0) {
+        if (num_bytes == 0) {
+            /* Client has hung up */
+            printf("server: client on socket %d hung up\n",
+                   client);
+        }
+        else {
+            perror("server: recv");
+        }
+        remove_from_list(client, fd_list);
+    }
+
+    /* Client sent a message */
+    broadcast_msg(msg, sizeof(msg), fd_list, listener, client);
+}
+
+
 void
 handle_event(Fd_list *fd_list, int num_fds, int listener)
 {
@@ -210,7 +277,7 @@ handle_event(Fd_list *fd_list, int num_fds, int listener)
             handle_listener_event(fd_list, listener);
         }
         else {
-            /* handle_client_event(); */
+            handle_client_event(fd_list, listener, fd);
         }
     }
 
@@ -234,7 +301,8 @@ main(void)
 
     for (;;) {
         int max_fd  = get_max_fd(fd_list);
-        int num_fds = select(max_fd + 1, &fd_list->fl_fdset, NULL, NULL, NULL);
+        int num_fds = select(max_fd + 1, &fd_list->fl_fdset,
+                             NULL, NULL, NULL);
         if (num_fds == -1) {
             perror("server: select");
             continue;
