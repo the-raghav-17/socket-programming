@@ -37,6 +37,7 @@ get_fd_list(void)
     int *fds     = malloc(capacity * sizeof(*fds));
 
     /* Default values for attributes */
+    FD_ZERO(&fd_list->fl_fdset);
     fd_list->fl_fds        = fds;
     fd_list->fl_fdcapacity = capacity;
     fd_list->fl_fdcount    = 0;
@@ -224,6 +225,7 @@ handle_listener_event(Fd_list *fd_list, int listener)
            remote_addrstr, new_fd);
 
     add_to_list(new_fd, fd_list);
+    FD_SET(listener, &fd_list->fl_fdset);
 }
 
 
@@ -248,7 +250,7 @@ handle_client_event(Fd_list *fd_list, int listener, int client)
 {
     /* Client has either sent a message or has hung up */
     char msg[MAX_MSG_LEN];
-    int num_bytes = recv(listener, msg, sizeof(msg), 0);
+    int num_bytes = recv(client, msg, sizeof(msg), 0);
 
     if (num_bytes <= 0) {
         if (num_bytes == 0) {
@@ -264,6 +266,9 @@ handle_client_event(Fd_list *fd_list, int listener, int client)
 
     /* Client sent a message */
     broadcast_msg(msg, sizeof(msg), fd_list, listener, client);
+
+    /* select modified the set. Put the fd in it */
+    FD_SET(client, &fd_list->fl_fdset);
 }
 
 
