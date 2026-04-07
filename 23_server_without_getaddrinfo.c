@@ -57,6 +57,7 @@ main(void)
         perror("listen");
     }
 
+    printf("Now waiting for some connections...\n");
     accept(sockfd, NULL, NULL);
     printf("Connected to client\n");
 
